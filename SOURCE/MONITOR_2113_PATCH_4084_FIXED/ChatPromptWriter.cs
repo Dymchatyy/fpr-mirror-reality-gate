@@ -127,17 +127,6 @@ internal static class ChatPromptWriter
 		int verticalInset = Math.Clamp((int)Math.Round(bounds.Height * 0.055), 38, 64);
 		int y = bounds.Bottom - verticalInset;
 
-		// FIX (по факту с реального рукопожатия, полный BHV ~ десятки КБ текста):
-		// фиксированные короткие паузы были рассчитаны на короткое тестовое сообщение.
-		// На настоящем BHV браузер физически не успевал отрисовать вставленный текст
-		// в contenteditable-поле за 180 мс — проверка читала ещё недорисованное поле,
-		// решала, что вставка не удалась, и запускала повтор. Повтор не зачищал поле
-		// явно (полагался на то, что Ctrl+V сам заменит выделение), поэтому на таком
-		// объёме текста повторные попытки задваивали/затраивали содержимое поверх
-		// самого себя вместо замены. Масштабируем паузу по длине текста и явно чистим
-		// поле (выделить всё + Delete) перед КАЖДОЙ попыткой вставки, включая первую.
-		int settleDelay = Math.Clamp(200 + text.Length / 20, 200, 4000);
-
 		bool cursorCaptured = GetCursorPos(out NativePoint originalPoint);
 
 		try
@@ -158,26 +147,26 @@ internal static class ChatPromptWriter
 				// повтор никогда не наслаивается на недовставленный или неудачно
 				// проверенный остаток предыдущей попытки. Enter не нажимается.
 				SendControlShortcut(VirtualKeyA);
-				await Task.Delay(Math.Min(settleDelay, 300));
+				await Task.Delay(200);
 				SendKeyPress(VirtualKeyDelete);
-				await Task.Delay(Math.Min(settleDelay, 300));
+				await Task.Delay(200);
 
 				if (!await SetClipboardTextAsync(text))
 				{
 					return ChatPromptWriteResult.Failed("Не удалось повторно подготовить текст FPR в буфере обмена.");
 				}
 				SendControlShortcut(VirtualKeyV);
-				await Task.Delay(settleDelay);
 
-				// Проверяем через тот же сфокусированный композер без обхода
-				// дерева UIA: выделяем его текст, копируем, сравниваем, затем
-				// оставляем текст FPR в буфере как безопасный ручной fallback.
-				SendControlShortcut(VirtualKeyA);
-				await Task.Delay(Math.Min(settleDelay, 400));
-				SendControlShortcut(0x43); // C
-				await Task.Delay(Math.Clamp(settleDelay / 2, 140, 1500));
-
-				if (TryReadClipboardText(out string copiedText) && TextMatches(copiedText, text))
+				// FIX (по замечанию: нельзя зашивать фиксированный потолок ожидания).
+				// Текст рукопожатия не имеет верхней границы размера — сегодня это
+				// десятки КБ BHV, завтра может быть файл, который браузер обрабатывает
+				// минуту. Поэтому не гадаем заранее, сколько ждать: реально опрашиваем
+				// поле, пока оно не совпадёт с ожидаемым текстом. Ждём столько, сколько
+				// поле продолжает меняться (расти); останавливаемся раньше только если
+				// рост явно застрял (перестал меняться) — тогда это не "ещё рисуется",
+				// а реальный промах клика или иной сбой, и есть смысл повторить попытку
+				// с начала, а не ждать дальше то, что не изменится.
+				if (await WaitForComposerToMatchAsync(text))
 				{
 					await SetClipboardTextAsync(text);
 					return ChatPromptWriteResult.Completed();
@@ -188,7 +177,7 @@ internal static class ChatPromptWriter
 				// payload в буфере; следующая попытка зачистит поле заново перед
 				// повторной вставкой — наслоения не будет.
 				await SetClipboardTextAsync(text);
-				await Task.Delay(settleDelay);
+				await Task.Delay(300);
 			}
 
 			return ChatPromptWriteResult.Failed(
@@ -201,6 +190,61 @@ internal static class ChatPromptWriter
 				SetCursorPos(originalPoint.X, originalPoint.Y);
 			}
 		}
+	}
+
+	// Опрашивает поле чата, пока вставленный текст не совпадёт с ожидаемым.
+	// Без искусственного потолка "на глаз" под текущий размер — ждём столько,
+	// сколько поле продолжает меняться. Останавливаемся раньше только тогда,
+	// когда рост явно застрял (несколько проверок подряд без изменений) —
+	// это признак реального сбоя (промах клика, фокус ушёл), а не медленной
+	// отрисовки, и тогда лучше сразу повторить попытку с начала, чем ждать
+	// впустую то, что дальше не изменится.
+	private static async Task<bool> WaitForComposerToMatchAsync(string expected)
+	{
+		const int pollIntervalMs = 250;
+		const int maxTotalWaitMs = 10 * 60 * 1000; // с большим запасом на будущие большие файлы
+		const int stallTimeoutMs = 5000;
+
+		int elapsed = 0;
+		int stalledFor = 0;
+		int lastLength = -1;
+
+		while (elapsed < maxTotalWaitMs)
+		{
+			SendControlShortcut(VirtualKeyA);
+			await Task.Delay(80);
+			SendControlShortcut(0x43); // C
+			await Task.Delay(80);
+			elapsed += 160;
+
+			if (TryReadClipboardText(out string copied))
+			{
+				if (TextMatches(copied, expected))
+				{
+					return true;
+				}
+
+				int length = NormalizeText(copied).Length;
+				if (length == lastLength)
+				{
+					stalledFor += pollIntervalMs;
+					if (stalledFor >= stallTimeoutMs)
+					{
+						return false;
+					}
+				}
+				else
+				{
+					stalledFor = 0;
+					lastLength = length;
+				}
+			}
+
+			await Task.Delay(pollIntervalMs);
+			elapsed += pollIntervalMs;
+		}
+
+		return false;
 	}
 
 	private static bool TryReadClipboardText(out string text)
