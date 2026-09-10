@@ -28,6 +28,7 @@ internal static class ChatPromptWriter
 	private const byte VirtualKeyControl = 0x11;
 	private const byte VirtualKeyA = 0x41;
 	private const byte VirtualKeyV = 0x56;
+	private const byte VirtualKeyDelete = 0x2E;
 
 	[DllImport("user32.dll")]
 	[return: MarshalAs(UnmanagedType.Bool)]
@@ -126,6 +127,17 @@ internal static class ChatPromptWriter
 		int verticalInset = Math.Clamp((int)Math.Round(bounds.Height * 0.055), 38, 64);
 		int y = bounds.Bottom - verticalInset;
 
+		// FIX (по факту с реального рукопожатия, полный BHV ~ десятки КБ текста):
+		// фиксированные короткие паузы были рассчитаны на короткое тестовое сообщение.
+		// На настоящем BHV браузер физически не успевал отрисовать вставленный текст
+		// в contenteditable-поле за 180 мс — проверка читала ещё недорисованное поле,
+		// решала, что вставка не удалась, и запускала повтор. Повтор не зачищал поле
+		// явно (полагался на то, что Ctrl+V сам заменит выделение), поэтому на таком
+		// объёме текста повторные попытки задваивали/затраивали содержимое поверх
+		// самого себя вместо замены. Масштабируем паузу по длине текста и явно чистим
+		// поле (выделить всё + Delete) перед КАЖДОЙ попыткой вставки, включая первую.
+		int settleDelay = Math.Clamp(200 + text.Length / 20, 200, 4000);
+
 		bool cursorCaptured = GetCursorPos(out NativePoint originalPoint);
 
 		try
@@ -142,23 +154,28 @@ internal static class ChatPromptWriter
 				mouse_event(MouseEventLeftUp, 0, 0, 0, 0);
 				await Task.Delay(120);
 
-				// Заменяем только текущее содержимое композера. Enter не нажимается.
+				// Явно зачищаем поле перед вставкой: выделить всё, удалить. Так
+				// повтор никогда не наслаивается на недовставленный или неудачно
+				// проверенный остаток предыдущей попытки. Enter не нажимается.
 				SendControlShortcut(VirtualKeyA);
-				await Task.Delay(70);
+				await Task.Delay(Math.Min(settleDelay, 300));
+				SendKeyPress(VirtualKeyDelete);
+				await Task.Delay(Math.Min(settleDelay, 300));
+
 				if (!await SetClipboardTextAsync(text))
 				{
 					return ChatPromptWriteResult.Failed("Не удалось повторно подготовить текст FPR в буфере обмена.");
 				}
 				SendControlShortcut(VirtualKeyV);
-				await Task.Delay(180);
+				await Task.Delay(settleDelay);
 
 				// Проверяем через тот же сфокусированный композер без обхода
 				// дерева UIA: выделяем его текст, копируем, сравниваем, затем
 				// оставляем текст FPR в буфере как безопасный ручной fallback.
 				SendControlShortcut(VirtualKeyA);
-				await Task.Delay(60);
+				await Task.Delay(Math.Min(settleDelay, 400));
 				SendControlShortcut(0x43); // C
-				await Task.Delay(140);
+				await Task.Delay(Math.Clamp(settleDelay / 2, 140, 1500));
 
 				if (TryReadClipboardText(out string copiedText) && TextMatches(copiedText, text))
 				{
@@ -166,10 +183,12 @@ internal static class ChatPromptWriter
 					return ChatPromptWriteResult.Completed();
 				}
 
-				// Клик мог случиться до того, как композер закончил рендер.
-				// Восстанавливаем payload и повторяем в той же безопасной точке.
+				// Клик мог случиться до того, как композер закончил рендер, или
+				// проверка застала ещё недорисованный текст. Восстанавливаем
+				// payload в буфере; следующая попытка зачистит поле заново перед
+				// повторной вставкой — наслоения не будет.
 				await SetClipboardTextAsync(text);
-				await Task.Delay(180);
+				await Task.Delay(settleDelay);
 			}
 
 			return ChatPromptWriteResult.Failed(
@@ -210,6 +229,12 @@ internal static class ChatPromptWriter
 		keybd_event(virtualKey, 0, 0, 0);
 		keybd_event(virtualKey, 0, KeyEventKeyUp, 0);
 		keybd_event(VirtualKeyControl, 0, KeyEventKeyUp, 0);
+	}
+
+	private static void SendKeyPress(byte virtualKey)
+	{
+		keybd_event(virtualKey, 0, 0, 0);
+		keybd_event(virtualKey, 0, KeyEventKeyUp, 0);
 	}
 
 	private static bool TextMatches(string actualText, string expectedText)
