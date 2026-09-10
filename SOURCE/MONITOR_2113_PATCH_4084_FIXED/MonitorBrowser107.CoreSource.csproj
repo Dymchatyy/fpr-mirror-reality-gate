@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>MonitorBrowser107.4080</AssemblyName>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- FIX (сессия 2 из 2): исходники в этом пакете получены декомпиляцией
+         готового .exe, а не собирались этим csproj напрямую. ApplicationConfiguration.cs
+         дублирует partial-класс, который WinForms SDK генерирует сам по себе
+         (аналогично уже существующему Remove для Monitor2110Bootstrap.cs чуть ниже),
+         из-за чего "dotnet build" падает с CS0260/CS0579/CS0111. Исключаем его —
+         SDK сгенерирует эквивалентный класс автоматически. -->
+    <Compile Remove="ApplicationConfiguration.cs" />
+    <Compile Remove="Monitor2110Bootstrap.cs" />
+    <!-- FIX (сессия 2 из 2): ChatResponseTransfer.cs использует System.Windows.Automation
+         (AutomationElement, InvokePattern и т.д.) — эти типы живут в UIAutomationClient.dll /
+         UIAutomationTypes.dll, которые не подключаются автоматически одним UseWindowsForms.
+         Без этих ссылок сборка падает с CS0234/CS0246. HintPath не нужен — обе сборки
+         входят в общий пакет ссылок Windows Desktop, доступный при EnableWindowsTargeting. -->
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
+    <Reference Include="Microsoft.Web.WebView2.Core">
+      <HintPath>../../FPR_4.084/app/runtime/monitor/Microsoft.Web.WebView2.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.WinForms">
+      <HintPath>../../FPR_4.084/app/runtime/monitor/Microsoft.Web.WebView2.WinForms.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Fpr.GraphicTrunk.Contract">
+      <HintPath>../../FPR_4.084/app/runtime/monitor/Fpr.GraphicTrunk.Contract.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
